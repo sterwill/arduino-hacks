@@ -2,14 +2,11 @@
 
 /* HARDWARE */
 
-// Pin must support PWM.
 #define POWER_RELAY_PIN        9
+#define POWER_LED_PIN          11
 
 // Define this value for normally closed relays; #undef if normally open.
 #define POWER_RELAY_NORMALLY_CLOSED
-
-// Pin must support PWM.
-#define POWER_LED_PIN          11
 
 // Linear taper potentiometer / variable resistor.
 #define POT_PIN                A1
@@ -18,6 +15,14 @@
 #define POT_CALIB_MIN          100
 #define POT_CALIB_MAX          1023
 #define POT_CALIB_RANGE        (POT_CALIB_MAX - POT_CALIB_MIN)
+
+// The shorter the better (so the heating element holds a steady temp), 
+// but too short or SSR won't be able to switch in time.
+#define POWER_CYCLE_MILLIS     50
+
+// Counts from 0 to POWER_CYCLE_MILLIS and resets
+static uint16_t power_loop_counter = 0;
+static uint32_t prev_loop_time = 0;
 
 void print(const char * format, ...) {
   char buf[1024];
@@ -29,51 +34,64 @@ void print(const char * format, ...) {
   Serial.write(buf, len);
 }
 
-/* CONTROL PARAMETERS */
-void set_led(uint8_t value) {
-  analogWrite(POWER_LED_PIN, value);
+void set_led(bool energize) {
+  digitalWrite(POWER_LED_PIN, energize ? HIGH : LOW);
 }
 
-void set_power(uint8_t value) {
+void set_power(bool energize) {
 #ifdef POWER_RELAY_NORMALLY_CLOSED
-  value = 255 - value;
+  int value = energize ? LOW : HIGH;
+#else
+  int value = energize ? HIGH : LOW;
 #endif
-  analogWrite(POWER_RELAY_PIN, value);
+  digitalWrite(POWER_RELAY_PIN, value);
 }
 
-/* Returns a normalized value (in the range 0-255) from POT_PIN. */
-uint8_t read_pot() {
-  uint16_t raw = (uint16_t) analogRead(POT_PIN);
-  print("raw = %04d [%d-%d], ", raw, POT_CALIB_MIN, POT_CALIB_MAX);
+/* Returns a normalized value (in the range 0-max_val) from POT_PIN. */
+uint16_t read_pot(uint16_t max_val) {
+  const uint16_t raw = (uint16_t) analogRead(POT_PIN);
 
   // Scale from calibration min and max.
+  uint16_t corrected;
   if (raw < POT_CALIB_MIN) {
-    raw = POT_CALIB_MIN;
+    corrected = POT_CALIB_MIN;
   } else if (raw > POT_CALIB_MAX) {
-    raw = POT_CALIB_MAX;
+    corrected = POT_CALIB_MAX;
   } else {
-    raw = raw - POT_CALIB_MIN;
+    corrected = raw - POT_CALIB_MIN;
   }
-  uint8_t scaled = 255 * ((float) raw / (float) POT_CALIB_RANGE);
+  const uint16_t scaled = max_val * ((float) corrected / (float) POT_CALIB_RANGE);
 
-  print("scaled = %03d\n", scaled);
+  print("raw = %04d [%d-%d], corrected = %04d / %04d, scaled = %04d / %04d\n", raw, 
+        POT_CALIB_MIN, POT_CALIB_MAX, corrected, POT_CALIB_RANGE, scaled, max_val);
   return scaled;
 }
 
 void setup() {
-  Serial.begin(115200);
-
   pinMode(POT_PIN, INPUT);
   pinMode(POWER_RELAY_PIN, OUTPUT);
   pinMode(POWER_LED_PIN, OUTPUT);
+  set_power(false);
+  set_led(false);
 
-  set_power(0);
-  set_led(0);
+  Serial.begin(115200);
 }
 
 void loop() {
-  uint8_t value = read_pot();
-  set_power(value);
-  set_led(value);
+  uint32_t this_loop_time = millis();
+  uint32_t delta = this_loop_time - prev_loop_time;
+  
+  // Account for elapsed time this loop
+  power_loop_counter += delta;
+  if (power_loop_counter > POWER_CYCLE_MILLIS) {
+    power_loop_counter = 0;
+  }
+
+  // Read the dial to see what proportion of the loop to energize in.
+  bool energize = power_loop_counter < read_pot(POWER_CYCLE_MILLIS);
+  set_power(energize);
+  set_led(energize);
+   
+  prev_loop_time = this_loop_time;
 }
 
